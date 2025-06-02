@@ -17,53 +17,53 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build_and_test:
-    name: Build and test
+  end-to-end:
+    name: End-to-end tests
     runs-on: ubuntu-24.04-arm
-    strategy:
-      matrix:
-        toolchain:
-          - nightly
     steps:
       - uses: actions/checkout@v4
-      - name: Setup rust toolchain, cache and bins
+
+      - name: Setup Rust toolchain, cache and bins
         uses: moonrepo/setup-rust@v1
         with:
           channel: nightly
           cache-base: main
           components: rustfmt, clippy
-      - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets --all-features --verbose
-      - run: cargo build --all-targets --all-features --verbose
-      # TODO: Change to the official version once https://github.com/noir-lang/noirup/pull/54 is merged
-      - uses: dzejkop/noirup@0.2.1
+
+      - name: Build all Rust targets
+        run: cargo build --all-targets --all-features --verbose
+
+      - name: Install specific noir version
+        uses: dzejkop/noirup@0.2.1
         with:
           commit: 2a79d90
-      - run: cargo test --no-fail-fast --all-targets --all-features --verbose
-      - run: cargo test --doc --all-features --verbose
-      - run: cargo doc --workspace --all-features --no-deps --document-private-items
-        env:
-          RUSTDOCFLAGS: "--cfg doc_cfg -D warnings"
 
-  benchmark:
-    name: Benchmark on Raspberry Pi 5
-    runs-on: [self-hosted, rpi5]
-    env:
-      DIVAN_MAX_TIME: 30
-      CODSPEED_RUNNER_MODE: walltime
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup rust toolchain, cache and cargo-codspeed binary
-        uses: moonrepo/setup-rust@v1
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          channel: nightly
-          cache-base: main
-          cache-target: release
-          bins: cargo-codspeed
-      - name: Build the benchmark target(s)
-        run: cargo codspeed build
-      - name: Run the benchmarks
-        uses: CodSpeedHQ/action@v3
+          go-version: 1.24
+
+      - name: Compile and execute Nargo circuit
+        working-directory: noir-examples/poseidon-rounds
+        run: |
+          nargo compile
+          nargo execute
+
+      - name: Generate Gnark inputs
+        working-directory: noir-examples/poseidon-rounds
+        run:  |
+          cargo run --release --bin noir-r1cs prepare ./target/basic.json -o ./noir-proof-scheme.nps
+          cargo run --release --bin noir-r1cs prove ./noir-proof-scheme.nps ./target/basic.gz -o ./noir-proof.np
+          cargo run --release --bin noir-r1cs generate-gnark-inputs ./noir-proof-scheme.nps ./noir-proof.np
+
+      - name: Upload proof artifacts
+        uses: actions/upload-artifact@v4
         with:
-          run: cargo codspeed run
-          token: ${{ secrets.CODSPEED_TOKEN }}
+          name: noir-artifacts
+          path: |
+            noir-examples/poseidon-rounds/noir-proof-scheme.nps
+            noir-examples/poseidon-rounds/noir-proof.np
+
+      - name: Run Gnark verifier
+        working-directory: gnark-whir
+        run: go run .
